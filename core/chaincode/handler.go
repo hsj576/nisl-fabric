@@ -1159,13 +1159,37 @@ func (h *Handler) HandleInvokeChaincode(msg *pb.ChaincodeMessage, txContext *Tra
 	return &pb.ChaincodeMessage{Type: pb.ChaincodeMessage_RESPONSE, Payload: res, Txid: msg.Txid, ChannelId: msg.ChannelId}, nil
 }
 
+var my_logger = flogging.MustGetLogger("handler_test")
+
+func check_namespace(namespace string) string {
+	flag := false
+	length := len(namespace)
+	if length > 8 {
+		if namespace[length-6:] == "_shard" { // 判断后缀是否为"_shard"
+			flag = true
+		}
+	}
+	if flag {
+		for i := length - 7; i > 0; i-- { // 提取链码命名空间
+			if namespace[i] == '_' {
+				//				my_logger.Infof("--------------------------------handler namespace changed ----------------------------------")
+				//				my_logger.Infof(namespace[:i])
+				return namespace[:i]
+			}
+		}
+	}
+	//	my_logger.Infof("----------------------------------handler namespace is not changed -----------------------------------")
+	//	my_logger.Infof(namespace)
+	return namespace
+}
+
 func (h *Handler) Execute(txParams *ccprovider.TransactionParams, namespace string, msg *pb.ChaincodeMessage, timeout time.Duration) (*pb.ChaincodeMessage, error) {
 	chaincodeLogger.Debugf("Entry")
 	defer chaincodeLogger.Debugf("Exit")
 
 	txParams.CollectionStore = h.getCollectionStore(msg.ChannelId)
 	txParams.IsInitTransaction = (msg.Type == pb.ChaincodeMessage_INIT)
-	txParams.NamespaceID = namespace
+	txParams.NamespaceID = check_namespace(namespace)
 
 	txctx, err := h.TXContexts.Create(txParams)
 	if err != nil {
