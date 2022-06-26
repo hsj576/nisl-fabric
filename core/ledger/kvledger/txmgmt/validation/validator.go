@@ -22,6 +22,11 @@ type validator struct {
 	hashFunc rwsetutil.HashFunc
 }
 
+type validateResult struct {
+	validationCode peer.TxValidationCode
+	err            error
+}
+
 // preLoadCommittedVersionOfRSet loads committed version of all keys in each
 // transaction's read set into a cache.
 func (v *validator) preLoadCommittedVersionOfRSet(blk *block) error {
@@ -79,36 +84,34 @@ func (v *validator) preLoadCommittedVersionOfRSet(blk *block) error {
 
 // validateAndPrepareBatch performs validation and prepares the batch for final writes
 func (v *validator) validateAndPrepareBatch(blk *block, doMVCCValidation bool) (*publicAndHashUpdates, error) {
-	// Check whether statedb implements BulkOptimizable interface. For now,
-	// only CouchDB implements BulkOptimizable to reduce the number of REST
-	// API calls from peer to CouchDB instance.
 	if v.db.IsBulkOptimizable() {
-		err := v.preLoadCommittedVersionOfRSet(blk)
-		if err != nil {
-			return nil, err
-		}
-	}
-
+        	err := v.preLoadCommittedVersionOfRSet(blk)
+        	if err != nil {
+           		 return nil, err
+        	}
+   	 }
 	updates := newPubAndHashUpdates()
+   	results := make(chan *validateResult)                    
 	for _, tx := range blk.txs {
-		var validationCode peer.TxValidationCode
-		var err error
-		if validationCode, err = v.validateEndorserTX(tx.rwset, doMVCCValidation, updates); err != nil {
-			return nil, err
-		}
-
-		tx.validationCode = validationCode
-		if validationCode == peer.TxValidationCode_VALID {
-			logger.Debugf("Block [%d] Transaction index [%d] TxId [%s] marked as valid by state validator. ContainsPostOrderWrites [%t]", blk.num, tx.indexInBlock, tx.id, tx.containsPostOrderWrites)
-			committingTxHeight := version.NewHeight(blk.num, uint64(tx.indexInBlock))
-			if err := updates.applyWriteSet(tx.rwset, committingTxHeight, v.db, tx.containsPostOrderWrites); err != nil {
-				return nil, err
-			}
-		} else {
-			logger.Warningf("Block [%d] Transaction index [%d] TxId [%s] marked as invalid by state validator. Reason code [%s]",
-				blk.num, tx.indexInBlock, tx.id, validationCode.String())
-		}
-	}
+        	var validationCode peer.TxValidationCode
+        	go v.validateEndorserTX(tx.rwset, doMVCCValidation, updates, results) 
+        	res := <-results
+        	if res.err !=nil{
+            		return nil,res.err
+        	}
+        	validationCode = res.validationCode
+        	tx.validationCode = validationCode
+        	if validationCode == peer.TxValidationCode_VALID {
+			logger.Infof("Block [%d] Transaction index [%d] TxId [%s] marked as valid by state validator. ContainsPostOrderWrites [%t]", blk.num, tx.indexInBlock, tx.id, tx.containsPostOrderWrites)
+            		committingTxHeight := version.NewHeight(blk.num, uint64(tx.indexInBlock))
+            		if err := updates.applyWriteSet(tx.rwset, committingTxHeight, v.db, tx.containsPostOrderWrites); err != nil {
+                 		return nil, err
+                	}
+            	} else {
+                	logger.Warningf("Block [%d] Transaction index [%d] TxId [%s] marked as invalid by state validator. Reason code [%s]",
+                	blk.num, tx.indexInBlock, tx.id, validationCode.String())
+            	}
+        }
 	return updates, nil
 }
 
@@ -116,14 +119,17 @@ func (v *validator) validateAndPrepareBatch(blk *block, doMVCCValidation bool) (
 func (v *validator) validateEndorserTX(
 	txRWSet *rwsetutil.TxRwSet,
 	doMVCCValidation bool,
-	updates *publicAndHashUpdates) (peer.TxValidationCode, error) {
-	validationCode := peer.TxValidationCode_VALID
+	updates *publicAndHashUpdates, results chan<- *validateResult)(peer.TxValidationCode, error){
+	var validationCode = peer.TxValidationCode_VALID
 	var err error
-	// mvcc validation, may invalidate transaction
-	if doMVCCValidation {
-		validationCode, err = v.validateTx(txRWSet, updates)
+    	if doMVCCValidation {
+        	validationCode, err = v.validateTx(txRWSet, updates)
 	}
-	return validationCode, err
+    	results <- &validateResult{
+        	validationCode: validationCode,
+        	err: err,
+   	}
+    	return validationCode, err
 }
 
 func (v *validator) validateTx(txRWSet *rwsetutil.TxRwSet, updates *publicAndHashUpdates) (peer.TxValidationCode, error) {
